@@ -64,6 +64,8 @@ profile_to_acpi_platform_profile_value (PpdDriverPlatformProfile *self,
       return "balanced";
     if (g_strv_contains ((const char * const*) self->profile_choices, "low-power"))
       return "low-power";
+    if (g_strv_contains ((const char * const*) self->profile_choices, "cool"))
+      return "cool";
     return "quiet";
   case PPD_PROFILE_BALANCED:
     return "balanced";
@@ -85,12 +87,12 @@ acpi_platform_profile_value_to_profile (const char *str)
     return PPD_PROFILE_UNSET;
 
   if (g_str_equal (str, "low-power") ||
-      g_str_equal (str, "quiet"))
+      g_str_equal (str, "quiet") ||
+      g_str_equal (str, "cool"))
     return PPD_PROFILE_POWER_SAVER;
 
   if (g_str_equal (str, "balanced") ||
-      g_str_equal (str, "balanced_performance") ||
-      g_str_equal (str, "cool"))
+      g_str_equal (str, "balanced_performance"))
     return PPD_PROFILE_BALANCED;
 
   if (g_str_equal (str, "performance"))
@@ -152,7 +154,8 @@ verify_acpi_platform_profile_choices (PpdDriverPlatformProfile *self)
   if (g_strv_contains (choices, "balanced") &&
       g_strv_contains (choices, "performance")) {
     if (g_strv_contains (choices, "low-power") ||
-        g_strv_contains (choices, "quiet"))
+        g_strv_contains (choices, "quiet") ||
+        g_strv_contains (choices, "cool"))
       self->has_low_power = TRUE;
     else
       g_debug ("No \"low-power\" profile for device, will be emulated");

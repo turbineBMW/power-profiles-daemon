@@ -1953,7 +1953,7 @@ class Tests(dbusmock.DBusTestCase):
         self.assertEqual(profiles[0]["Profile"], "power-saver")
         self.assertEqual(self.get_dbus_property("ActiveProfile"), "balanced")
         self.assertEqual(
-            self.read_sysfs_file("sys/firmware/acpi/platform_profile"), b"cool"
+            self.read_sysfs_file("sys/firmware/acpi/platform_profile"), b"balanced"
         )
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
         self.assertEqual(self.get_dbus_property("ActiveProfile"), "power-saver")
