@@ -72,7 +72,8 @@ ppd_action_amdgpu_dpm_update_target (PpdActionAmdgpuDpm *self, GError **error)
     target = "auto";
     break;
   default:
-    g_assert_not_reached ();
+    g_message ("No profile set, skipping amdgpu dpm update");
+    return FALSE;
   }
 
   devices = g_udev_client_query_by_subsystem (self->client, "drm");
