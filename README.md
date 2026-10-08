@@ -229,6 +229,35 @@ enabled using `powerprofilesctl`:
 powerprofilesctl configure-action amdgpu_dpm --enable
 ```
 
+## Operations on other machines
+
+On Apple Silicon machines, which use the `apple-cpufreq` scaling driver, the
+"driver" for making the CPU act on the user-selected power profile is based on
+the [frequency boost switch](https://docs.kernel.org/admin-guide/pm/cpufreq.html#frequency-boost-support)
+of the CPU frequency scaling subsystem.
+
+It is only used if every CPU frequency policy uses a scaling driver where
+turning boost off is known to cap the CPU at its sustainable frequency,
+currently only `apple-cpufreq`, and the boost switch exists and can be written:
+
+```sh
+$ cat /sys/devices/system/cpu/cpufreq/policy*/scaling_driver
+apple-cpufreq
+apple-cpufreq
+apple-cpufreq
+$ cat /sys/devices/system/cpu/cpufreq/boost
+1
+```
+
+Any other machine, including every x86 machine, keeps the driver it uses
+today.
+
+The "power-saver" profile turns boost off, which keeps the CPU at or below its
+highest sustainable frequency. The "balanced" and "performance" profiles turn
+it on. The scaling governor is not changed. The boost switch has no setting
+that depends on the power source, so it follows the selected profile on
+battery and on AC alike.
+
 ## Multiple driver and multiple action operations
 
 Power-profiles daemon will load all supported drivers and actions by default.

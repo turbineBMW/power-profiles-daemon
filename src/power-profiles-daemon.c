@@ -143,6 +143,7 @@ static void upower_battery_set_power_changed_reason (PpdApp *, PpdPowerChangedRe
 #include "ppd-driver-platform-profile.h"
 #include "ppd-driver-intel-pstate.h"
 #include "ppd-driver-amd-pstate.h"
+#include "ppd-driver-cpufreq.h"
 #include "ppd-driver-fake.h"
 
 typedef GType (*GTypeGetFunc) (void);
@@ -154,7 +155,8 @@ static GTypeGetFunc objects[] = {
   ppd_driver_intel_pstate_get_type,
   ppd_driver_amd_pstate_get_type,
 
-  /* Generic profile driver */
+  /* Generic profile drivers */
+  ppd_driver_cpufreq_get_type,
   ppd_driver_placeholder_get_type,
 
   /* Actions */

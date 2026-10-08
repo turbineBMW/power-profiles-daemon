@@ -25,6 +25,7 @@ private_headers = [
   'ppd-driver-fake.h',
   'ppd-driver-intel-pstate.h',
   'ppd-driver-amd-pstate.h',
+  'ppd-driver-cpufreq.h',
   'ppd-driver-placeholder.h',
   'ppd-driver-platform-profile.h',
   'ppd-utils.h',

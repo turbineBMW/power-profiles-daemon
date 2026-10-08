@@ -20,6 +20,7 @@
 # GNU General Public License for more details.
 
 import os
+import shutil
 import subprocess
 import signal
 import sys
@@ -1391,6 +1392,155 @@ class Tests(dbusmock.DBusTestCase):
         self.assert_file_eventually_contains(energy_prefs, "power")
         self.assert_file_eventually_contains(scaling_governor, "powersave")
         self.assert_file_eventually_contains(boost, "0")
+
+    def create_cpufreq_boost(self, *scaling_drivers):
+        cpufreq_dir = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/"
+        )
+        os.makedirs(cpufreq_dir, exist_ok=True)
+        for index, scaling_driver in enumerate(scaling_drivers):
+            policy = os.path.join(cpufreq_dir, f"policy{index}")
+            os.makedirs(policy, exist_ok=True)
+            if scaling_driver is None:
+                # A directory cannot be read as a file, even by root
+                os.makedirs(os.path.join(policy, "scaling_driver"))
+                continue
+            self.write_file_contents(
+                os.path.join(policy, "scaling_driver"), scaling_driver + "\n"
+            )
+        boost = os.path.join(cpufreq_dir, "boost")
+        self.write_file_contents(boost, "1\n")
+        return boost
+
+    def test_cpufreq_boost(self):
+        """Generic cpufreq driver switches the global boost per profile"""
+
+        boost = self.create_cpufreq_boost(
+            "apple-cpufreq", "apple-cpufreq", "apple-cpufreq"
+        )
+
+        self.start_daemon()
+
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]["Profile"], "power-saver")
+        self.assertEqual(profiles[0]["CpuDriver"], "cpufreq")
+        self.assertEqual(profiles[0]["PlatformDriver"], "placeholder")
+        self.assertEqual(profiles[0]["Driver"], "multiple")
+        self.assertEqual(profiles[2]["Profile"], "performance")
+        self.assertEqual(profiles[2]["Driver"], "cpufreq")
+
+        self.assert_file_eventually_contains(boost, "1")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "power-saver")
+        self.assert_file_eventually_contains(boost, "0")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("performance"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "performance")
+        self.assert_file_eventually_contains(boost, "1")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(boost, "0")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("balanced"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "balanced")
+        self.assert_file_eventually_contains(boost, "1")
+
+    def test_cpufreq_ignores_other_scaling_drivers(self):
+        """Generic cpufreq driver leaves other scaling drivers to the placeholder"""
+
+        cases = {
+            "acpi-cpufreq": ("acpi-cpufreq",),
+            "intel_cpufreq": ("intel_cpufreq",),
+            "amd-pstate passive": ("amd-pstate",),
+            "mixed policies": ("apple-cpufreq", "acpi-cpufreq"),
+            "unreadable policy and another driver": (None, "acpi-cpufreq"),
+            "only unreadable policies": (None,),
+            "no policies": (),
+        }
+        cpufreq_dir = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/"
+        )
+        for case, scaling_drivers in cases.items():
+            with self.subTest(case=case):
+                shutil.rmtree(cpufreq_dir, ignore_errors=True)
+                boost = self.create_cpufreq_boost(*scaling_drivers)
+
+                self.start_daemon()
+
+                profiles = self.get_dbus_property("Profiles")
+                self.assertEqual(len(profiles), 2)
+                self.assertEqual(profiles[0]["Driver"], "placeholder")
+
+                self.set_dbus_property(
+                    "ActiveProfile", GLib.Variant.new_string("power-saver")
+                )
+                self.assertEqual(self.get_dbus_property("ActiveProfile"), "power-saver")
+                with open(boost, "rb") as f:
+                    self.assertEqual(f.read(), b"1\n")
+
+                self.stop_daemon(delete_profile=True)
+
+    def test_cpufreq_skips_unreadable_policy(self):
+        """Generic cpufreq driver skips a policy whose scaling driver cannot be read"""
+
+        boost = self.create_cpufreq_boost("apple-cpufreq", None, "apple-cpufreq")
+
+        self.start_daemon()
+
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]["CpuDriver"], "cpufreq")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(boost, "0")
+
+    def test_cpufreq_read_only_boost(self):
+        """Generic cpufreq driver is not used when the boost switch cannot be written"""
+
+        boost = self.create_cpufreq_boost("apple-cpufreq")
+        self.change_immutable(boost, True)
+
+        self.start_daemon()
+
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 2)
+        self.assertEqual(profiles[0]["Driver"], "placeholder")
+        with open(boost, "rb") as f:
+            self.assertEqual(f.read(), b"1\n")
+
+    def test_cpufreq_yields_to_amd_pstate(self):
+        """A hardware-specific CPU driver wins over the generic cpufreq driver"""
+
+        boost = self.create_cpufreq_boost()
+        policy = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/policy0/"
+        )
+        os.makedirs(policy)
+        self.write_file_contents(
+            os.path.join(policy, "scaling_governor"), "powersave\n"
+        )
+        self.write_file_contents(
+            os.path.join(policy, "energy_performance_preference"), "performance\n"
+        )
+        pstate_dir = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/amd_pstate"
+        )
+        os.makedirs(pstate_dir)
+        self.write_file_contents(os.path.join(pstate_dir, "status"), "active\n")
+
+        self.start_daemon()
+
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]["CpuDriver"], "amd_pstate")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(
+            os.path.join(policy, "energy_performance_preference"), "power"
+        )
+        with open(boost, "rb") as f:
+            self.assertEqual(f.read(), b"1\n")
 
     def test_amd_pstate_balance(self):
         """AMD P-State driver (balance)"""
