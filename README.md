@@ -258,6 +258,37 @@ it on. The scaling governor is not changed. The boost switch has no setting
 that depends on the power source, so it follows the selected profile on
 battery and on AC alike.
 
+On machines whose CPU frequency is managed by Arm SCMI or Qualcomm firmware, or
+described by generic OPP tables, such as the Qualcomm Snapdragon X series, the
+same driver caps each policy's `scaling_max_freq` instead, at a share of the
+policy's highest non-boost frequency rounded to the nearest supported frequency:
+60% in "power-saver", and in "balanced" 75% on battery and no cap on AC or on
+machines without a battery, so single-board computers and servers keep their
+full speed by default. Battery awareness follows `configure-battery-aware`.
+Boost is off by default on these machines, so on its own it can't tell the
+profiles apart. The boost switch is left alone: the uncapped profiles allow the
+boost frequencies, so whether they are used stays up to the switch. This is used
+if every CPU frequency policy uses the `scmi`, `qcom-cpufreq-hw` or `cpufreq-dt`
+scaling driver and none offers an energy-performance preference:
+
+```sh
+$ cat /sys/devices/system/cpu/cpufreq/policy*/scaling_driver
+scmi
+scmi
+scmi
+```
+
+The scaling governor and the minimum frequency are not changed. The caps are
+re-applied after resume. When the daemon stops, they are lifted to the
+hardware maximum, so another tool's lower `scaling_max_freq` is not preserved
+(see [Conflicts](#conflicts)).
+
+A cluster whose CPUs are all offline is skipped, even at startup. When it comes
+back online, or a new policy appears, it keeps the cap it last had until the
+next profile change or resume, which caps it like the others. A cluster that is
+offline when the daemon stops can't have its cap lifted, and keeps it until it
+is written again or the system restarts.
+
 ## Multiple driver and multiple action operations
 
 Power-profiles daemon will load all supported drivers and actions by default.
