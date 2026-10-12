@@ -1993,6 +1993,25 @@ class Tests(dbusmock.DBusTestCase):
             self.read_sysfs_file("sys/firmware/acpi/platform_profile"), b"quiet"
         )
 
+    def test_balanced_performance(self):
+        """The kernel spells it balanced-performance"""
+        acpi_dir = os.path.join(self.testbed.get_root_dir(), "sys/firmware/acpi/")
+        os.makedirs(acpi_dir)
+        platform_profile = os.path.join(acpi_dir, "platform_profile")
+        self.write_file_contents(platform_profile, "low-power\n")
+        self.write_file_contents(
+            os.path.join(acpi_dir, "platform_profile_choices"),
+            "low-power balanced balanced-performance performance\n",
+        )
+
+        self.start_daemon()
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("performance"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "performance")
+
+        # Firmware or a hotkey picks balanced-performance behind our back
+        self.write_file_contents(platform_profile, "balanced-performance\n")
+        self.assert_dbus_property_eventually_is("ActiveProfile", "balanced")
+
     def test_custom_acpi_platform_profile(self):
         self.create_custom_platform_profile()
         self.start_daemon()

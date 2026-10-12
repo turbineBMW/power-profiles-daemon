@@ -92,7 +92,7 @@ acpi_platform_profile_value_to_profile (const char *str)
     return PPD_PROFILE_POWER_SAVER;
 
   if (g_str_equal (str, "balanced") ||
-      g_str_equal (str, "balanced_performance"))
+      g_str_equal (str, "balanced-performance"))
     return PPD_PROFILE_BALANCED;
 
   if (g_str_equal (str, "performance"))
