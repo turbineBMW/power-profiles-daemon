@@ -77,6 +77,9 @@ profile_to_acpi_platform_profile_value (PpdDriverPlatformProfile *self,
   g_return_val_if_reached (NULL);
 }
 
+/* The values and their spelling are defined by the kernel ABI:
+ * https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-platform_profile
+ */
 static PpdProfile
 acpi_platform_profile_value_to_profile (const char *str)
 {
