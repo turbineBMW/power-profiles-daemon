@@ -461,6 +461,14 @@ class Tests(dbusmock.DBusTestCase):
                 )
             GLib.MainContext.default().iteration(False)
 
+    def wait_for_sleep_monitor(self):
+        """Wait until the daemon listens for logind's PrepareForSleep"""
+        self.assert_eventually(
+            lambda: self.have_text_in_log("Suspension state monitor required")
+        )
+        # Let the bus register the match rule
+        time.sleep(0.2)
+
     def assert_file_eventually_contains(
         self, path, contents, timeout=800, keep_checking=0
     ):
@@ -1508,6 +1516,356 @@ class Tests(dbusmock.DBusTestCase):
         self.assertEqual(profiles[0]["Driver"], "placeholder")
         with open(boost, "rb") as f:
             self.assertEqual(f.read(), b"1\n")
+
+    X1E_FREQS = (
+        "710400 806400 998400 1190400 1440000 1670400 1920000 2188800 "
+        "2515200 2707200 2976000 3206400 3417600"
+    )
+
+    def create_cpufreq_policy(
+        self, name, driver, freqs, epp=False, boost_freqs=None, cpuinfo_max=None
+    ):
+        policy = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq", name
+        )
+        os.makedirs(policy)
+        top = freqs.split()[-1]
+        self.write_file_contents(os.path.join(policy, "scaling_driver"), driver + "\n")
+        self.write_file_contents(
+            os.path.join(policy, "cpuinfo_max_freq"), (cpuinfo_max or top) + "\n"
+        )
+        if boost_freqs:
+            self.write_file_contents(
+                os.path.join(policy, "scaling_boost_frequencies"), boost_freqs + " \n"
+            )
+        self.write_file_contents(os.path.join(policy, "scaling_max_freq"), top + "\n")
+        self.write_file_contents(
+            os.path.join(policy, "scaling_available_frequencies"), freqs + " \n"
+        )
+        if epp:
+            self.write_file_contents(
+                os.path.join(policy, "energy_performance_preference"), "default\n"
+            )
+        return os.path.join(policy, "scaling_max_freq")
+
+    def start_upower(self, on_battery):
+        _, upowerd, _ = self.start_dbus_template(
+            "upower", {"DaemonVersion": "0.99", "OnBattery": on_battery}
+        )
+        return upowerd
+
+    def test_cpufreq_caps(self):
+        """Profiles cap each cpufreq policy at a share of its maximum"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        small = self.create_cpufreq_policy(
+            "policy8", "scmi", "500000 1000000 1500000 2000000"
+        )
+        boost = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/boost"
+        )
+        self.write_file_contents(boost, "0\n")
+
+        upowerd = self.start_upower(True)
+        self.start_daemon()
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]["CpuDriver"], "cpufreq")
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "balanced")
+        self.assert_file_eventually_contains(max0, "2515200")
+        self.assert_file_eventually_contains(max4, "2515200")
+        self.assert_file_eventually_contains(small, "1500000")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.assert_file_eventually_contains(small, "1000000")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("performance"))
+        self.assert_file_eventually_contains(max0, "3417600")
+        self.assert_file_eventually_contains(small, "2000000")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("balanced"))
+        self.assert_file_eventually_contains(max0, "2515200")
+
+        # The boost switch is never touched
+        self.assertEqual(self.read_file_contents(boost), b"0\n")
+
+        # Balanced is capped on AC too
+        upowerd.Set("org.freedesktop.UPower", "OnBattery", False)
+        self.assert_file_eventually_contains(max0, "2515200", keep_checking=200)
+
+    def test_cpufreq_caps_replace_existing_cap(self):
+        """A cap left behind by something else is replaced"""
+        max0 = self.create_cpufreq_policy("policy0", "qcom-cpufreq-hw", self.X1E_FREQS)
+        self.write_file_contents(max0, "1920000\n")
+
+        self.start_daemon()
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "balanced")
+        self.assert_file_eventually_contains(max0, "2515200")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+
+    def test_cpufreq_caps_leave_boost_alone(self):
+        """The caps method never changes the boost switch"""
+        self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        boost = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/boost"
+        )
+        self.write_file_contents(boost, "1\n")
+
+        self.start_daemon()
+        for profile in ("power-saver", "performance", "balanced"):
+            self.set_dbus_property("ActiveProfile", GLib.Variant.new_string(profile))
+            self.assert_file_eventually_contains(boost, "1\n", keep_checking=100)
+        self.stop_daemon()
+        self.assertEqual(self.read_file_contents(boost), b"1\n")
+
+    def test_cpufreq_caps_vanished_policy(self):
+        """A policy that disappears is dropped without warnings"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        self.start_daemon()
+        # Drivers are probed after the bus name is acquired
+        self.assert_eventually(
+            lambda: self.have_text_in_log("Capping 2 cpufreq policies")
+        )
+
+        shutil.rmtree(os.path.dirname(max4))
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("balanced"))
+        self.assert_file_eventually_contains(max0, "2515200")
+        self.assertTrue(self.have_text_in_log("disappeared"))
+        self.assertFalse(self.have_text_in_log("Could not cap"))
+
+    def test_cpufreq_caps_nearest_frequency(self):
+        """Caps round to the nearest supported frequency, down on a tie"""
+        max0 = self.create_cpufreq_policy(
+            "policy0", "scmi", "400000 650000 800000 1000000"
+        )
+        max4 = self.create_cpufreq_policy("policy4", "scmi", "500000 700000 1000000")
+
+        self.start_daemon()
+        # 75% is 750000: 800000 is nearer than 650000
+        self.assert_file_eventually_contains(max0, "800000")
+        self.assert_file_eventually_contains(max4, "700000")
+        # 60% is 600000: 650000 is nearer than 400000, and on policy4
+        # 500000 and 700000 are equally near
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "650000")
+        self.assert_file_eventually_contains(max4, "500000")
+
+    def test_cpufreq_caps_ignore_cpufreq_dt(self):
+        """Generic OPP tables (cpufreq-dt) keep the placeholder driver"""
+        max0 = self.create_cpufreq_policy("policy0", "cpufreq-dt", self.X1E_FREQS)
+
+        self.start_daemon()
+        self.assertEqual(self.get_dbus_property("Profiles")[0]["Driver"], "placeholder")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "power-saver")
+        self.assert_file_eventually_contains(max0, "3417600\n", keep_checking=200)
+
+    def test_cpufreq_caps_new_policy(self):
+        """A policy that appears after startup is capped at the next change"""
+        self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        self.start_daemon()
+        self.assertEqual(self.get_dbus_property("Profiles")[0]["CpuDriver"], "cpufreq")
+
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max4, "1920000")
+
+    def test_cpufreq_caps_boost_frequencies(self):
+        """Caps ignore boost frequencies, and performance lifts to them"""
+        # cpuinfo_max_freq keeps the boost frequency once boost has been on
+        max4 = self.create_cpufreq_policy(
+            "policy4",
+            "scmi",
+            self.X1E_FREQS,
+            boost_freqs="4012800",
+            cpuinfo_max="4012800",
+        )
+        boost = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/boost"
+        )
+        self.write_file_contents(boost, "0\n")
+
+        self.start_daemon()
+        self.assert_file_eventually_contains(max4, "2515200")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max4, "1920000")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("performance"))
+        self.assert_file_eventually_contains(max4, "4012800")
+        self.assertEqual(self.read_file_contents(boost), b"0\n")
+
+    def test_cpufreq_caps_boost_reveals_max(self):
+        """Without boost frequency lists, performance follows cpuinfo_max_freq"""
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        # An empty list, as some kernels show without boost frequencies
+        self.write_file_contents(
+            os.path.join(os.path.dirname(max4), "scaling_boost_frequencies"), "\n"
+        )
+        boost = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/boost"
+        )
+        self.write_file_contents(boost, "0\n")
+
+        self.start_daemon()
+        self.assert_file_eventually_contains(max4, "2515200")
+
+        # Something turns boost on, and the kernel raises cpuinfo_max_freq
+        self.write_file_contents(boost, "1\n")
+        self.write_file_contents(
+            os.path.join(os.path.dirname(max4), "cpuinfo_max_freq"), "4012800\n"
+        )
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("performance"))
+        self.assert_file_eventually_contains(max4, "4012800")
+
+        # Stopping from a capped profile lifts to the discovered maximum, not
+        # the one seen at probe
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max4, "1920000")
+        self.stop_daemon()
+        self.assertEqual(self.read_file_contents(max4), b"4012800")
+
+    def test_cpufreq_boost_reapply_on_resume(self):
+        """The boost method is re-applied after resume too"""
+        boost = self.create_cpufreq_boost("apple-cpufreq")
+        _, obj_logind, _ = self.start_dbus_template("logind", {})
+        self.start_daemon()
+        self.assert_file_eventually_contains(boost, "1")
+        self.wait_for_sleep_monitor()
+
+        self.write_file_contents(boost, "0\n")
+        obj_logind.EmitSignal(
+            "org.freedesktop.login1.Manager", "PrepareForSleep", "b", [True]
+        )
+        obj_logind.EmitSignal(
+            "org.freedesktop.login1.Manager", "PrepareForSleep", "b", [False]
+        )
+        self.assert_file_eventually_contains(boost, "1", timeout=3000)
+
+    def test_cpufreq_caps_left_alone(self):
+        """Mixed scaling drivers and EPP keep the placeholder"""
+        cpufreq_dir = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/"
+        )
+        cases = {
+            "scmi and apple-cpufreq": (("scmi", False), ("apple-cpufreq", False)),
+            "energy preference": (("scmi", True),),
+            "no frequency table": (("scmi", False),),
+        }
+        for case, policies in cases.items():
+            with self.subTest(case=case):
+                shutil.rmtree(cpufreq_dir, ignore_errors=True)
+                for index, (driver, epp) in enumerate(policies):
+                    self.create_cpufreq_policy(
+                        f"policy{index}", driver, self.X1E_FREQS, epp=epp
+                    )
+                if case == "no frequency table":
+                    os.remove(
+                        os.path.join(
+                            cpufreq_dir, "policy0", "scaling_available_frequencies"
+                        )
+                    )
+                self.start_daemon()
+                try:
+                    self.assertEqual(
+                        self.get_dbus_property("Profiles")[0]["Driver"], "placeholder"
+                    )
+                finally:
+                    self.stop_daemon(delete_profile=True)
+
+    def test_cpufreq_caps_with_platform_profile(self):
+        """Caps and a platform profile work together"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        self.create_platform_profile()
+        self.start_daemon()
+
+        profiles = self.get_dbus_property("Profiles")
+        self.assertEqual(len(profiles), 3)
+        self.assertEqual(profiles[0]["Driver"], "multiple")
+        self.assertEqual(profiles[0]["CpuDriver"], "cpufreq")
+        self.assertEqual(profiles[0]["PlatformDriver"], "platform_profile")
+
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.assertEqual(
+            self.read_sysfs_file("sys/firmware/acpi/platform_profile"), b"low-power"
+        )
+
+    def test_cpufreq_caps_lifted_on_exit(self):
+        """Stopping the daemon lifts the caps"""
+        max0 = self.create_cpufreq_policy(
+            "policy0", "scmi", self.X1E_FREQS, boost_freqs="4012800"
+        )
+        boost = os.path.join(
+            self.testbed.get_root_dir(), "sys/devices/system/cpu/cpufreq/boost"
+        )
+        self.write_file_contents(boost, "0\n")
+        self.start_daemon()
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+
+        # Stopping from a capped profile lifts the cap to the boost maximum
+        self.stop_daemon()
+        self.assertEqual(self.read_file_contents(max0), b"4012800")
+        self.assertEqual(self.read_file_contents(boost), b"0\n")
+
+    def test_cpufreq_caps_unwritable_policy(self):
+        """A policy that can't be written is reported and the others are capped"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        os.remove(max4)
+        os.makedirs(max4)
+
+        self.start_daemon()
+        self.assertEqual(self.get_dbus_property("Profiles")[0]["CpuDriver"], "cpufreq")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assertEqual(self.get_dbus_property("ActiveProfile"), "power-saver")
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.assertTrue(self.have_text_in_log("Could not cap"))
+
+    def test_cpufreq_caps_unreadable_policy(self):
+        """An unreadable policy at startup, such as an offline cluster, is skipped"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        max4 = self.create_cpufreq_policy("policy4", "scmi", self.X1E_FREQS)
+        driver4 = os.path.join(os.path.dirname(max4), "scaling_driver")
+        os.remove(driver4)
+        os.makedirs(driver4)
+
+        self.start_daemon()
+        self.assertEqual(self.get_dbus_property("Profiles")[0]["CpuDriver"], "cpufreq")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.assertEqual(self.read_file_contents(max4), b"3417600\n")
+
+        # The cluster comes back online: the next profile change caps it
+        os.rmdir(driver4)
+        self.write_file_contents(driver4, "scmi\n")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("balanced"))
+        self.assert_file_eventually_contains(max4, "2515200")
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max4, "1920000")
+
+    def test_cpufreq_caps_reapply_on_resume(self):
+        """Caps are re-applied after resume"""
+        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
+        _, obj_logind, _ = self.start_dbus_template("logind", {})
+        self.start_daemon()
+        self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
+        self.assert_file_eventually_contains(max0, "1920000")
+        self.wait_for_sleep_monitor()
+
+        # Something lifts the cap across suspend
+        self.write_file_contents(max0, "3417600\n")
+        obj_logind.EmitSignal(
+            "org.freedesktop.login1.Manager", "PrepareForSleep", "b", [True]
+        )
+        obj_logind.EmitSignal(
+            "org.freedesktop.login1.Manager", "PrepareForSleep", "b", [False]
+        )
+        self.assert_file_eventually_contains(max0, "1920000", timeout=3000)
 
     def test_cpufreq_yields_to_amd_pstate(self):
         """A hardware-specific CPU driver wins over the generic cpufreq driver"""
