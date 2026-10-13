@@ -262,10 +262,7 @@ On machines whose CPU frequency is managed by Arm SCMI or Qualcomm firmware, or
 described by generic OPP tables, such as the Qualcomm Snapdragon X series, the
 same driver caps each policy's `scaling_max_freq` instead, at a share of the
 policy's highest non-boost frequency rounded to the nearest supported frequency:
-60% in "power-saver", and in "balanced" 75% on battery and no cap on AC or on
-machines without a battery, so single-board computers and servers keep their
-full speed by default. Battery awareness follows `configure-battery-aware`.
-Boost is off by default on these machines, so on its own it can't tell the
+60% in "power-saver" and 75% in "balanced", on battery and on AC alike. Boost is off by default on these machines, so on its own it can't tell the
 profiles apart. The boost switch is left alone: the uncapped profiles allow the
 boost frequencies, so whether they are used stays up to the switch. This is used
 if every CPU frequency policy uses the `scmi`, `qcom-cpufreq-hw` or `cpufreq-dt`

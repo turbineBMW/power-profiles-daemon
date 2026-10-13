@@ -1590,23 +1590,19 @@ class Tests(dbusmock.DBusTestCase):
         # The boost switch is never touched
         self.assertEqual(self.read_file_contents(boost), b"0\n")
 
-        # On AC, balanced is uncapped
+        # Balanced is capped on AC too
         upowerd.Set("org.freedesktop.UPower", "OnBattery", False)
-        self.assert_file_eventually_contains(max0, "3417600")
-        self.assert_file_eventually_contains(small, "2000000")
-        self.assertEqual(self.read_file_contents(boost), b"0\n")
-        upowerd.Set("org.freedesktop.UPower", "OnBattery", True)
-        self.assert_file_eventually_contains(max0, "2515200")
+        self.assert_file_eventually_contains(max0, "2515200", keep_checking=200)
 
     def test_cpufreq_caps_no_battery(self):
-        """Without a battery, balanced keeps the full speed"""
+        """Without a battery, balanced is capped too"""
         max0 = self.create_cpufreq_policy("policy0", "cpufreq-dt", self.X1E_FREQS)
         # A cap left behind by something else is lifted too
         self.write_file_contents(max0, "1920000\n")
 
         self.start_daemon()
         self.assertEqual(self.get_dbus_property("ActiveProfile"), "balanced")
-        self.assert_file_eventually_contains(max0, "3417600", keep_checking=200)
+        self.assert_file_eventually_contains(max0, "2515200")
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
         self.assert_file_eventually_contains(max0, "1920000")
 
@@ -1625,20 +1621,6 @@ class Tests(dbusmock.DBusTestCase):
         self.stop_daemon()
         self.assertEqual(self.read_file_contents(boost), b"1\n")
 
-    def test_cpufreq_caps_unknown_power_source(self):
-        """An unknown power source counts as AC"""
-        max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
-        _, _, stop_upowerd = self.start_dbus_template(
-            "upower", {"DaemonVersion": "0.99", "OnBattery": True}
-        )
-
-        self.start_daemon()
-        self.assert_file_eventually_contains(max0, "2515200")
-
-        # upowerd goes away: balanced is no longer capped
-        stop_upowerd()
-        self.assert_file_eventually_contains(max0, "3417600")
-
     def test_cpufreq_caps_vanished_policy(self):
         """A policy that disappears is dropped without warnings"""
         max0 = self.create_cpufreq_policy("policy0", "scmi", self.X1E_FREQS)
@@ -1653,13 +1635,12 @@ class Tests(dbusmock.DBusTestCase):
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
         self.assert_file_eventually_contains(max0, "1920000")
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("balanced"))
-        self.assert_file_eventually_contains(max0, "3417600")
+        self.assert_file_eventually_contains(max0, "2515200")
         self.assertTrue(self.have_text_in_log("disappeared"))
         self.assertFalse(self.have_text_in_log("Could not cap"))
 
     def test_cpufreq_caps_nearest_frequency(self):
         """Caps round to the nearest supported frequency"""
-        self.start_upower(True)
         max0 = self.create_cpufreq_policy(
             "policy0", "cpufreq-dt", "600000 750000 1000000 1500000"
         )
@@ -1696,7 +1677,6 @@ class Tests(dbusmock.DBusTestCase):
         )
         self.write_file_contents(boost, "0\n")
 
-        self.start_upower(True)
         self.start_daemon()
         self.assert_file_eventually_contains(max4, "2515200")
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))
@@ -1717,7 +1697,6 @@ class Tests(dbusmock.DBusTestCase):
         )
         self.write_file_contents(boost, "0\n")
 
-        self.start_upower(True)
         self.start_daemon()
         self.assert_file_eventually_contains(max4, "2515200")
 
@@ -1842,7 +1821,6 @@ class Tests(dbusmock.DBusTestCase):
         os.remove(driver4)
         os.makedirs(driver4)
 
-        self.start_upower(True)
         self.start_daemon()
         self.assertEqual(self.get_dbus_property("Profiles")[0]["CpuDriver"], "cpufreq")
         self.set_dbus_property("ActiveProfile", GLib.Variant.new_string("power-saver"))

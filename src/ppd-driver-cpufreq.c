@@ -28,10 +28,9 @@
  * It is only used when every cpufreq policy runs one of the scaling drivers
  * in the table below. Any other system keeps its current driver.
  *
- * The boost method follows the selected profile alone, on battery and on AC
- * alike. With the caps method, balanced is only capped on battery, so
- * machines without one, such as single-board computers and servers, keep
- * their full speed by default.
+ * There is no power_changed handler: neither method has a setting that
+ * depends on the power source, so the selected profile alone decides it,
+ * on battery and on AC alike.
  */
 
 #define G_LOG_DOMAIN "CpuDriver"
@@ -52,7 +51,7 @@
  * method. Measured on a Snapdragon X Elite, 75% costs ~16% of sustained
  * throughput for ~39% less energy, and 60% ~37% for ~50% less. */
 #define POWER_SAVER_PERCENT        60
-#define BALANCED_BATTERY_PERCENT   75
+#define BALANCED_PERCENT           75
 #define UNCAPPED_PERCENT           100
 
 typedef enum {
@@ -89,7 +88,6 @@ struct _PpdDriverCpufreq
   CpufreqMethod method;
   char *boost_path;
   GPtrArray *policies; /* of Policy, with the caps method */
-  gboolean on_battery;
 };
 
 G_DEFINE_TYPE (PpdDriverCpufreq, ppd_driver_cpufreq, PPD_TYPE_DRIVER_CPU)
@@ -409,14 +407,13 @@ profile_to_boost (PpdProfile profile)
 }
 
 static guint
-profile_to_percent (PpdProfile profile,
-                    gboolean   on_battery)
+profile_to_percent (PpdProfile profile)
 {
   switch (profile) {
   case PPD_PROFILE_POWER_SAVER:
     return POWER_SAVER_PERCENT;
   case PPD_PROFILE_BALANCED:
-    return on_battery ? BALANCED_BATTERY_PERCENT : UNCAPPED_PERCENT;
+    return BALANCED_PERCENT;
   case PPD_PROFILE_PERFORMANCE:
     return UNCAPPED_PERCENT;
   }
@@ -521,7 +518,7 @@ apply_caps (PpdDriverCpufreq  *cpufreq,
 
   pick_up_new_policies (cpufreq);
 
-  percent = profile_to_percent (profile, cpufreq->on_battery);
+  percent = profile_to_percent (profile);
   for (guint i = 0; i < policies->len;) {
     Policy *policy = g_ptr_array_index (policies, i);
     guint64 cap = policy_cap (policy, percent);
@@ -609,28 +606,6 @@ ppd_driver_cpufreq_activate_profile (PpdDriver                   *driver,
   return TRUE;
 }
 
-static gboolean
-ppd_driver_cpufreq_power_changed (PpdDriver              *driver,
-                                  PpdPowerChangedReason   reason,
-                                  GError                **error)
-{
-  PpdDriverCpufreq *cpufreq = PPD_DRIVER_CPUFREQ (driver);
-  gboolean on_battery = (reason == PPD_POWER_CHANGED_REASON_BATTERY);
-
-  /* An unknown power source counts as AC, as with amd_pstate */
-  if (cpufreq->on_battery == on_battery)
-    return TRUE;
-  cpufreq->on_battery = on_battery;
-
-  /* Only balanced depends on the power source */
-  if (cpufreq->method != CPUFREQ_METHOD_CAPS ||
-      cpufreq->activated_profile != PPD_PROFILE_BALANCED)
-    return TRUE;
-
-  g_debug ("Power source changed, re-applying the balanced caps");
-  return apply_caps (cpufreq, PPD_PROFILE_BALANCED, error);
-}
-
 /* Re-apply the profile after resume in case anything changed the boost
  * switch or lifted the caps. A cluster coming back online keeps the cap it
  * had, or none if it was offline at probe, until the next profile change or
@@ -711,7 +686,6 @@ ppd_driver_cpufreq_class_init (PpdDriverCpufreqClass *klass)
   driver_class = PPD_DRIVER_CLASS (klass);
   driver_class->probe = ppd_driver_cpufreq_probe;
   driver_class->activate_profile = ppd_driver_cpufreq_activate_profile;
-  driver_class->power_changed = ppd_driver_cpufreq_power_changed;
   driver_class->prepare_to_sleep = ppd_driver_cpufreq_prepare_for_sleep;
 }
 
